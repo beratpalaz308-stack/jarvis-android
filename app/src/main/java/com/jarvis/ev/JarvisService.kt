@@ -72,6 +72,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private var onDone: (() -> Unit)? = null
     private val history = JSONArray()   // sadece düz metin sohbet geçmişi
     @Volatile private var ringing = false
+    @Volatile private var convo = false
     private var ringNum: String? = null
 
     // dinleme sağlığı
@@ -273,8 +274,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }
 
         override fun onPartialResults(p: Bundle?) {
-            if (state != "wake") return
             val list = p?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
+            list.firstOrNull()?.let { sendBroadcast(Intent(ACTION_STATE).setPackage(packageName).putExtra("heard", it)) }
+            if (state != "wake") return
             val hit = list.firstOrNull { parseWake(it) != null } ?: return
             handleWake(hit, false)
         }
@@ -337,10 +339,10 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }, delay)
     }
 
-    private fun startWake() { state = "wake"; lastBeat = System.currentTimeMillis(); push(); relisten(80) }
+    private fun startWake() { convo = false; state = "wake"; lastBeat = System.currentTimeMillis(); push(); relisten(80) }
 
     private fun afterReply(reply: String) {
-        if (reply.trimEnd().endsWith("?")) { state = "command"; push(); relisten(300) } else startWake()
+        if (convo || reply.trimEnd().endsWith("?")) { state = "command"; push(); relisten(300) } else startWake()
     }
 
     private fun norm(s: String) = s.lowercase(Locale("tr"))
@@ -373,6 +375,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun handleWake(t: String, allowRest: Boolean) {
+        convo = true
         state = "speak"
         try { recognizer?.cancel() } catch (e: Exception) {}
         val rest = if (allowRest) (parseWake(t) ?: "") else ""
@@ -382,6 +385,13 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     // ================= komut işleme =================
     private fun process(text: String) {
+        val nb = norm(text)
+        if (convo && nb.trim().split(" ").size <= 3 &&
+            Regex("\\b(tamam|tesekkur\\w*|sag ol|gorusuruz|bu kadar|yeter|hosca kal|iyi geceler)\\b").containsMatchIn(nb)) {
+            convo = false
+            speak("Rica ederim efendim, ben buradayım.") { startWake() }
+            return
+        }
         state = "think"
         push("Siz: $text")
         Thread {
@@ -519,7 +529,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             "Kullanıcı seni Jarvis, Karen, Çavuş, Cumali veya Hey diye çağırabilir; hepsinde aynı sensin. " +
             "Sesin yumuşak ve sevecen, yakın bir dost gibi ilgili ve naziksin; arada küçük bir iltifat ya da hal hatır sorabilirsin ama cevabı uzatma. " +
             "Kullanıcıya 'efendim' de, ara sıra 'canım' gibi sıcak sözcükler kullanabilirsin. Türkçe konuş. " +
-            "Cevapların sesli okunacak: en fazla 2-3 kısa cümle; markdown, emoji, link yok. " +
+            "Cevapların sesli okunacak. Sohbet, araştırma ve fikir sorularında uzun ve sohbet eder gibi, doğal ve akıcı konuş: 4-8 cümle, samimi, açıklayıcı, arada kullanıcıya küçük bir soru sor. Sadece bir işi yaptırma komutlarında (alarm, arama vb.) kısa onay ver. Markdown, madde işareti, emoji ve link kullanma. " +
             "Telefonu kontrol eden çok sayıda aracın var. Kullanıcı bir şey yapmanı istediğinde soru sormadan araçları çağır, gerekirse birkaç aracı arka arkaya kullan, sonra ne yaptığını tek kısa cümleyle söyle. " +
             "Bilmediğin veya güncel her şey için research (gerekirse read_webpage) kullan, bulduğunu arkadaşça anlat. " +
             "Uygulama içinde işlem gerekirse: open_app, wait(2), read_screen ile bak, click/tap/type_text/scroll/swipe ile ilerle; her adımdan sonra gerekirse tekrar read_screen. " +
@@ -535,7 +545,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                 .put("system_instruction", textObj(null, sys))
                 .put("contents", contents)
                 .put("tools", tools)
-                .put("generationConfig", JSONObject().put("maxOutputTokens", 500).put("temperature", 0.6))
+                .put("generationConfig", JSONObject().put("maxOutputTokens", 900).put("temperature", 0.6))
             val r = post(body)
             val content = r.optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")
             val parts = content?.optJSONArray("parts")
@@ -552,8 +562,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             for (c in calls) {
                 val name = c.getString("name")
                 val args = c.optJSONObject("args") ?: JSONObject()
-                push("» $name")
                 val out = try { exec(name, args) } catch (e: Exception) { "Hata: ${e.message}" }
+                push("» $name: ${out.take(70)}")
                 acted = true
                 resp.put(JSONObject().put("functionResponse",
                     JSONObject().put("name", name).put("response", JSONObject().put("result", out))))
@@ -569,7 +579,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     private fun research(q: String): String {
         val body = JSONObject()
-            .put("system_instruction", textObj(null, "Google'da araştır ve bulduklarını Türkçe, sade, en fazla 5 cümleyle özetle."))
+            .put("system_instruction", textObj(null, "Google'da araştır ve bulduklarını Türkçe, sade, en fazla 8 cümleyle özetle."))
             .put("contents", JSONArray().put(textObj("user", q)))
             .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
         return textOf(post(body)).ifEmpty { "Sonuç bulamadım." }

@@ -22,6 +22,7 @@ import android.widget.*
 class MainActivity : Activity() {
     private lateinit var reactor: ReactorView
     private lateinit var status: TextView
+    private lateinit var heard: TextView
     private lateinit var logView: TextView
     private lateinit var key: EditText
     private lateinit var btn: Button
@@ -32,6 +33,7 @@ class MainActivity : Activity() {
     private val rx = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, i: Intent?) {
             if (i == null) return
+            if (i.hasExtra("heard")) { heard.text = "Duyuyorum: " + i.getStringExtra("heard"); return }
             if (i.hasExtra("rms")) {
                 val v = i.getFloatExtra("rms", 0f)
                 if (v > reactor.level) reactor.level = v
@@ -63,12 +65,15 @@ class MainActivity : Activity() {
             setPadding(dp(18), dp(36), dp(18), dp(18))
         }
         val title = TextView(this).apply {
-            text = "J.A.R.V.I.S v3"; setTextColor(cyan); textSize = 26f
+            text = "J.A.R.V.I.S v4"; setTextColor(cyan); textSize = 26f
             typeface = Typeface.MONOSPACE; gravity = Gravity.CENTER; letterSpacing = 0.3f
         }
         reactor = ReactorView(this)
         status = TextView(this).apply {
             setTextColor(cyan); textSize = 13f; typeface = Typeface.MONOSPACE; gravity = Gravity.CENTER
+        }
+        heard = TextView(this).apply {
+            setTextColor(Color.parseColor("#7FA9B3")); textSize = 12f; typeface = Typeface.MONOSPACE; gravity = Gravity.CENTER
         }
         logView = TextView(this).apply {
             setTextColor(Color.parseColor("#9FDDE6")); textSize = 13f; typeface = Typeface.MONOSPACE
@@ -107,6 +112,7 @@ class MainActivity : Activity() {
         root.addView(title)
         root.addView(reactor, LinearLayout.LayoutParams(-1, 0, 1.2f))
         root.addView(status, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, dp(6), 0, dp(8)) })
+        root.addView(heard, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, dp(6)) })
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 0.8f))
         root.addView(key, LinearLayout.LayoutParams(-1, -2))
         root.addView(btn, LinearLayout.LayoutParams(-1, dp(52)).apply { setMargins(0, dp(8), 0, dp(8)) })
