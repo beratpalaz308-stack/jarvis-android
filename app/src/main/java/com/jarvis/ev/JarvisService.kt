@@ -211,7 +211,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) { stopSelf(); return }
         tts?.language = Locale("tr", "TR")
-        tts?.setSpeechRate(1.05f)
+        tts?.setSpeechRate(1.15f)
         tts?.setPitch(1.08f)
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) {}
@@ -396,7 +396,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         push("Siz: $text")
         Thread {
             val reply = try {
-                tryCallReply(text) ?: tryAlarm(text) ?: agent(text)
+                tryCallReply(text) ?: tryAlarm(text) ?: tryQuick(text) ?: agent(text)
             } catch (e: GemErr) {
                 e.message ?: "Bir sorun var efendim."
             } catch (e: Exception) {
@@ -417,6 +417,28 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (h > 23 || min > 59) return null
         if (h < 12 && (n.contains("aksam") || n.contains("ogleden sonra") || n.contains("gece"))) h += 12
         return setAlarm(h, min, "Jarvis")
+    }
+
+    /** Hızlı yol: sık kullanılan basit komutlar yapay zekaya gitmeden anında yapılır. */
+    private fun tryQuick(raw: String): String? {
+        val n = norm(raw).trim(' ', '.', '!', '?')
+        if (n.contains("fener")) {
+            if (n.contains("kapat") || n.contains("sondur")) return flashlight(false)
+            if (n.contains("ac") || n.contains("yak")) return flashlight(true)
+        }
+        Regex("ses\\w*\\s+(?:yuzde\\s+)?(\\d{1,3})").find(n)?.let { return setVolume(it.groupValues[1].toInt(), "music") }
+        if ((n.contains("sonraki") || n.contains("ileri") || n.contains("sarkiyi gec")) && (n.contains("sarki") || n.contains("muzik"))) return media("next")
+        if (n.contains("onceki") && (n.contains("sarki") || n.contains("muzik"))) return media("previous")
+        if ((n.contains("durdur") || n.contains("duraklat")) && (n.contains("muzik") || n.contains("sarki"))) return media("play_pause")
+        val m = Regex("^(.+?)\\s+(?:ac|acar misin|calistir|baslat)$").find(n)
+        if (m != null) {
+            val name = m.groupValues[1].replace("'", "").trim()
+            if (name.isNotEmpty() && name.split(" ").size <= 3) {
+                val r = openApp(name)
+                if (!r.startsWith("'")) return r
+            }
+        }
+        return null
     }
 
     // ================= yapay zeka (araç çağıran ajan) =================
@@ -624,7 +646,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     private fun launch(i: Intent, ok: String): String = try {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(i)
+        val accCtx = JarvisAccess.inst
+        if (accCtx != null) accCtx.startActivity(i) else startActivity(i)
         ok
     } catch (e: Exception) {
         "Başlatılamadı. Ekran üstü gösterme ve diğer izinleri kontrol edin. (${e.javaClass.simpleName})"
@@ -800,9 +823,19 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         val list = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
         val hit = list.firstOrNull { norm(it.loadLabel(pm).toString()) == nq }
             ?: list.firstOrNull { norm(it.loadLabel(pm).toString()).contains(nq) }
+            ?: list.firstOrNull { val l = norm(it.loadLabel(pm).toString()); l.length >= 3 && nq.contains(l) }
             ?: return "'$name' adlı uygulamayı bulamadım."
-        val li = pm.getLaunchIntentForPackage(hit.activityInfo.packageName) ?: return "Uygulama açılamadı."
-        return launch(li, "${hit.loadLabel(pm)} açıldı.")
+        val pkg = hit.activityInfo.packageName
+        val li = pm.getLaunchIntentForPackage(pkg) ?: return "Uygulama açılamadı."
+        val r = launch(li, "${hit.loadLabel(pm)} açıldı.")
+        val acc = JarvisAccess.inst
+        if (acc != null && r.endsWith("açıldı.")) {
+            Thread.sleep(1500)
+            val cur = acc.rootInActiveWindow?.packageName?.toString()
+            if (cur != null && cur != pkg)
+                return "${hit.loadLabel(pm)} için komutu gönderdim. Açılmadıysa Ekran üstü iznini kontrol edin."
+        }
+        return r
     }
 
     private fun playMusic(q: String): String {
