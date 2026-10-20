@@ -73,6 +73,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private val history = JSONArray()   // sadece düz metin sohbet geçmişi
     @Volatile private var ringing = false
     @Volatile private var convo = false
+    private var cmdTries = 0
+    private var gen = 0
+    private var curUtt = ""
     private var ringNum: String? = null
 
     // dinleme sağlığı
@@ -187,7 +190,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         try { recognizer?.cancel() } catch (e: Exception) {}
         val num = ringNum
         val who = if (num.isNullOrBlank()) "Bir numara" else (nameFor(num) ?: num)
-        speak("$who arıyor efendim, açayım mı?") { state = "command"; push(); relisten(0) }
+        speak("$who arıyor efendim, açayım mı?") { cmdTries = 0; state = "command"; push(); relisten(350) }
     }
 
     private fun nameFor(number: String): String? = try {
@@ -215,9 +218,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         tts?.setPitch(1.08f)
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) {}
-            override fun onDone(id: String?) { finishSpeak() }
+            override fun onDone(id: String?) { if (id == curUtt) finishSpeak() }
             @Deprecated("Deprecated in Java")
-            override fun onError(id: String?) { finishSpeak() }
+            override fun onError(id: String?) { if (id == curUtt) finishSpeak() }
         })
         muteBeeps(true)
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
@@ -231,10 +234,13 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     private fun speak(text: String, done: () -> Unit) {
         main.post {
+            gen++
             state = "speak"
             push("Jarvis: $text")
             onDone = done
-            val r = tts?.speak(clean(text).take(3900), TextToSpeech.QUEUE_FLUSH, null, System.nanoTime().toString())
+            val id = System.nanoTime().toString()
+            curUtt = id
+            val r = tts?.speak(clean(text).take(3900), TextToSpeech.QUEUE_FLUSH, null, id)
             if (r != TextToSpeech.SUCCESS) finishSpeak()
         }
     }
@@ -300,7 +306,12 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             lastBeat = System.currentTimeMillis()
             when {
                 code == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> stopSelf()
-                state == "command" -> startWake()
+                state == "command" -> {
+                    push("(komut duyulmadı, hata $code)")
+                    if (code == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) { createRecognizer(); relisten(300) }
+                    else if (++cmdTries <= 2) relisten(150)
+                    else startWake()
+                }
                 state != "wake" -> {}
                 code == SpeechRecognizer.ERROR_CLIENT || code == SpeechRecognizer.ERROR_SERVER -> {
                     failCount++
@@ -330,8 +341,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun relisten(delay: Long) {
+        val g = gen
         main.postDelayed({
-            if (!running) return@postDelayed
+            if (!running || g != gen) return@postDelayed
             try {
                 if (++cycles % 30 == 0) createRecognizer()
                 recognizer?.startListening(if (state == "command") cmdIntent else wakeIntent)
@@ -342,7 +354,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private fun startWake() { convo = false; state = "wake"; lastBeat = System.currentTimeMillis(); push(); relisten(80) }
 
     private fun afterReply(reply: String) {
-        if (convo || reply.trimEnd().endsWith("?")) { state = "command"; push(); relisten(300) } else startWake()
+        if (convo || reply.trimEnd().endsWith("?")) { cmdTries = 1; state = "command"; push(); relisten(500) } else startWake()
     }
 
     private fun norm(s: String) = s.lowercase(Locale("tr"))
@@ -380,7 +392,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         try { recognizer?.cancel() } catch (e: Exception) {}
         val rest = if (allowRest) (parseWake(t) ?: "") else ""
         if (rest.length >= 4) process(rest)
-        else speak("Buyrun efendim") { state = "command"; push(); relisten(0) }
+        else speak("Buyrun efendim") { cmdTries = 0; state = "command"; push(); relisten(350) }
     }
 
     // ================= komut işleme =================
@@ -392,16 +404,25 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             speak("Rica ederim efendim, ben buradayım.") { startWake() }
             return
         }
+        cmdTries = 0
+        gen++
         state = "think"
         push("Siz: $text")
+        main.postDelayed({
+            if (state == "think") speak("Bakıyorum efendim") {}
+        }, 3000)
         Thread {
+            val t0 = System.currentTimeMillis()
             val reply = try {
                 tryCallReply(text) ?: tryAlarm(text) ?: tryQuick(text) ?: agent(text)
             } catch (e: GemErr) {
+                push("Hata: ${e.message}")
                 e.message ?: "Bir sorun var efendim."
             } catch (e: Exception) {
+                push("Hata: ${e.javaClass.simpleName} ${e.message}")
                 "İnternete ulaşamıyorum efendim."
             }
+            push("süre: ${(System.currentTimeMillis() - t0) / 1000} sn")
             main.post { speak(reply) { afterReply(reply) } }
         }.start()
     }
@@ -457,7 +478,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             .openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.connectTimeout = 10000
-        conn.readTimeout = 40000
+        conn.readTimeout = 25000
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
         conn.setRequestProperty("x-goog-api-key", key)
@@ -562,7 +583,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         contents.put(userMsg)
         var answer = ""
         var acted = false
+        val t0 = System.currentTimeMillis()
         for (step in 0 until 15) {
+            if (System.currentTimeMillis() - t0 > 40000) { answer = "Bu biraz uzun sürdü efendim, tekrar dener misiniz?"; break }
             val body = JSONObject()
                 .put("system_instruction", textObj(null, sys))
                 .put("contents", contents)
