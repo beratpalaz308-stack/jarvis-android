@@ -3,6 +3,7 @@ package com.jarvis.ev
 import android.Manifest
 import android.app.Activity
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -65,7 +66,7 @@ class MainActivity : Activity() {
             setPadding(dp(18), dp(36), dp(18), dp(18))
         }
         val title = TextView(this).apply {
-            text = "J.A.R.V.I.S v6"; setTextColor(cyan); textSize = 26f
+            text = "J.A.R.V.I.S v7"; setTextColor(cyan); textSize = 26f
             typeface = Typeface.MONOSPACE; gravity = Gravity.CENTER; letterSpacing = 0.3f
         }
         reactor = ReactorView(this)
@@ -97,10 +98,13 @@ class MainActivity : Activity() {
         val bOv = mk("EKRAN ÜSTÜ") {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         }
-        val bBat = mk("PİL İZNİ") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        val bBat = mk("PİL İZNİ") {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        }
         val bWr = mk("AYAR YAZMA") {
             startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName")))
         }
+        val bAuto = mk("OTOMATİK BAŞLATMA") { openAutostart() }
         fun rowOf(a: Button, b: Button?): LinearLayout {
             val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             r.addView(a, LinearLayout.LayoutParams(0, dp(44), 1f).apply { setMargins(0, dp(3), dp(4), dp(3)) })
@@ -118,10 +122,29 @@ class MainActivity : Activity() {
         root.addView(btn, LinearLayout.LayoutParams(-1, dp(52)).apply { setMargins(0, dp(8), 0, dp(8)) })
         root.addView(rowOf(bAcc, bNot), LinearLayout.LayoutParams(-1, -2))
         root.addView(rowOf(bOv, bBat), LinearLayout.LayoutParams(-1, -2))
-        root.addView(rowOf(bWr, null), LinearLayout.LayoutParams(-1, -2))
+        root.addView(rowOf(bWr, bAuto), LinearLayout.LayoutParams(-1, -2))
         setContentView(root)
 
         askPerms()
+        if (getSharedPreferences("jarvis", 0).getBoolean("autostart", false) && !JarvisService.running &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
+            key.text.isNotBlank()) {
+            startForegroundService(Intent(this, JarvisService::class.java))
+        }
+    }
+
+    private fun openAutostart() {
+        val comps = listOf(
+            ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"),
+            ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
+            ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
+            ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"),
+            ComponentName("com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity")
+        )
+        for (c in comps) {
+            try { startActivity(Intent().setComponent(c)); return } catch (e: Exception) {}
+        }
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
 
     private fun askPerms() {
@@ -139,6 +162,7 @@ class MainActivity : Activity() {
     private fun toggle() {
         getSharedPreferences("jarvis", 0).edit().putString("api", key.text.toString().trim()).apply()
         if (JarvisService.running) {
+            getSharedPreferences("jarvis", 0).edit().putBoolean("autostart", false).apply()
             stopService(Intent(this, JarvisService::class.java))
             update("off", "")
             return
@@ -149,6 +173,7 @@ class MainActivity : Activity() {
         if (key.text.isBlank()) {
             Toast.makeText(this, "Önce Gemini API anahtarını yazın efendim", Toast.LENGTH_LONG).show(); return
         }
+        getSharedPreferences("jarvis", 0).edit().putBoolean("autostart", true).apply()
         startForegroundService(Intent(this, JarvisService::class.java))
         update("wake", "")
     }

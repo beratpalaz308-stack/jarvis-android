@@ -1,5 +1,6 @@
 package com.jarvis.ev
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -22,6 +23,7 @@ import android.location.Location
 import android.location.LocationManager
 import android.media.AudioManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
@@ -29,6 +31,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import android.provider.ContactsContract
@@ -67,6 +70,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private var recognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private lateinit var audio: AudioManager
     private var state = "wake"          // wake, command, think, speak
     private var onDone: (() -> Unit)? = null
@@ -118,19 +122,41 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         audio = getSystemService(AUDIO_SERVICE) as AudioManager
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel("jarvis", "Jarvis", NotificationManager.IMPORTANCE_LOW))
-        if (Build.VERSION.SDK_INT >= 29)
-            startForeground(1, buildNotif(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        else startForeground(1, buildNotif())
+        try {
+            if (Build.VERSION.SDK_INT >= 29)
+                startForeground(1, buildNotif(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            else startForeground(1, buildNotif())
+        } catch (e: Exception) { stopSelf(); return }
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "jarvis:listen").apply { acquire() }
+        try {
+            @Suppress("DEPRECATION")
+            val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "jarvis:wifi").apply { acquire() }
+        } catch (e: Exception) {}
         val f = IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(phoneRx, f, Context.RECEIVER_EXPORTED) else registerReceiver(phoneRx, f)
         tts = TextToSpeech(this, this)
     }
 
     override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
-        if (i?.action == "stop") { stopSelf(); return START_NOT_STICKY }
+        if (i?.action == "stop") {
+            getSharedPreferences("jarvis", MODE_PRIVATE).edit().putBoolean("autostart", false).apply()
+            stopSelf(); return START_NOT_STICKY
+        }
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (getSharedPreferences("jarvis", MODE_PRIVATE).getBoolean("autostart", false)) {
+            try {
+                val pi = PendingIntent.getForegroundService(this, 7, Intent(this, JarvisService::class.java),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                getSystemService(AlarmManager::class.java).set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + 1500, pi)
+            } catch (e: Exception) {}
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
@@ -141,6 +167,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         tts?.shutdown()
         muteBeeps(false)
         try { wakeLock?.release() } catch (e: Exception) {}
+        try { wifiLock?.release() } catch (e: Exception) {}
         sendBroadcast(Intent(ACTION_STATE).setPackage(packageName).putExtra("state", "off"))
         super.onDestroy()
     }
@@ -471,23 +498,42 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         return o
     }
 
+    private val models = listOf(MODEL, "gemini-2.5-flash", "gemini-2.5-flash-lite")
+    private var modelIdx = 0
+    private var thinkCfg = true
+
     private fun post(body: JSONObject): JSONObject {
         val key = apiKey()
         if (key.isBlank()) throw GemErr("API anahtarı yok efendim.")
-        val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent")
-            .openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.connectTimeout = 10000
-        conn.readTimeout = 25000
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("x-goog-api-key", key)
-        conn.outputStream.use { it.write(body.toString().toByteArray()) }
-        val code = conn.responseCode
-        val txt = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText() ?: ""
-        if (code == 429) throw GemErr("Günlük ücretsiz limit doldu efendim. Biraz sonra tekrar deneyelim.")
-        if (code !in 200..299) throw GemErr("Bir sorun var efendim. Anahtarı ve interneti kontrol eder misiniz?")
-        return JSONObject(txt)
+        var last = 0
+        var i = modelIdx
+        while (i < models.size) {
+            val b = JSONObject(body.toString())
+            if (thinkCfg) {
+                val gc = b.optJSONObject("generationConfig") ?: JSONObject().also { b.put("generationConfig", it) }
+                gc.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+            }
+            val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent")
+                .openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 10000
+            conn.readTimeout = 25000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("x-goog-api-key", key)
+            conn.outputStream.use { it.write(b.toString().toByteArray()) }
+            val code = conn.responseCode
+            val txt = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText() ?: ""
+            if (code in 200..299) return JSONObject(txt)
+            last = code
+            push("Model ${models[i]} hata $code")
+            if (code == 400 && thinkCfg && txt.contains("thinking", ignoreCase = true)) { thinkCfg = false; continue }
+            if (code == 404) { modelIdx = i + 1; i++; continue }
+            if (code == 429 || code == 500 || code == 503) { i++; continue }
+            break
+        }
+        if (last == 429) throw GemErr("Günlük ücretsiz limit doldu efendim. Biraz sonra tekrar deneyelim.")
+        throw GemErr("Bir sorun var efendim. Anahtarı ve interneti kontrol eder misiniz? (hata $last)")
     }
 
     private fun textOf(r: JSONObject): String {
@@ -584,7 +630,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         var answer = ""
         var acted = false
         val t0 = System.currentTimeMillis()
-        for (step in 0 until 15) {
+        for (step in 0 until 20) {
             if (System.currentTimeMillis() - t0 > 40000) { answer = "Bu biraz uzun sürdü efendim, tekrar dener misiniz?"; break }
             val body = JSONObject()
                 .put("system_instruction", textObj(null, sys))
@@ -618,7 +664,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (answer.isEmpty()) answer = if (acted) "Tamamdır efendim." else "Bir cevap bulamadım efendim."
         history.put(userMsg)
         history.put(textObj("model", answer))
-        while (history.length() > 12) history.remove(0)
+        while (history.length() > 20) history.remove(0)
         return answer
     }
 
