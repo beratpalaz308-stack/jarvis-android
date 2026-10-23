@@ -1,3 +1,7 @@
+import java.io.File
+import java.net.URL
+import java.util.zip.ZipInputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -28,16 +32,16 @@ dependencies {
 val voskModel by tasks.registering {
     doLast {
         val out = project.file("src/main/assets/vosk-model")
-        if (!java.io.File(out, "am").exists()) {
+        if (!File(out, "am").exists()) {
             out.deleteRecursively()
             out.mkdirs()
-            val url = java.net.URL("https://alphacephei.com/vosk/models/vosk-model-small-tr-0.3.zip")
-            java.util.zip.ZipInputStream(url.openStream().buffered()).use { zin ->
+            val url = URL("https://alphacephei.com/vosk/models/vosk-model-small-tr-0.3.zip")
+            ZipInputStream(url.openStream().buffered()).use { zin ->
                 var e = zin.nextEntry
                 while (e != null) {
                     val rel = e.name.split("/").drop(1).joinToString("/")
                     if (rel.isNotEmpty()) {
-                        val f = java.io.File(out, rel)
+                        val f = File(out, rel)
                         if (e.isDirectory) f.mkdirs() else {
                             f.parentFile.mkdirs()
                             f.outputStream().use { o -> zin.copyTo(o) }
