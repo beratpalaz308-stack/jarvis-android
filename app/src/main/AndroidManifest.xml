@@ -54,6 +54,7 @@
         </receiver>
         <service
             android:name=".JarvisService"
+            android:stopWithTask="false"
             android:exported="false"
             android:foregroundServiceType="microphone" />
         <service
