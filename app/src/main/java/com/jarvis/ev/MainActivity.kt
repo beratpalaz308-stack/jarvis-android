@@ -66,7 +66,7 @@ class MainActivity : Activity() {
             setPadding(dp(18), dp(36), dp(18), dp(18))
         }
         val title = TextView(this).apply {
-            text = "J.A.R.V.I.S v7"; setTextColor(cyan); textSize = 26f
+            text = "J.A.R.V.I.S v9"; setTextColor(cyan); textSize = 26f
             typeface = Typeface.MONOSPACE; gravity = Gravity.CENTER; letterSpacing = 0.3f
         }
         reactor = ReactorView(this)

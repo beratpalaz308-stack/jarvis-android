@@ -16,7 +16,8 @@ import java.io.FileOutputStream
 class VoskWake(
     private val ctx: Context,
     private val onBeat: () -> Unit,
-    private val onText: (String) -> Unit
+    private val onText: (String) -> Unit,
+    private val onPartial: (String) -> Unit
 ) {
     @Volatile private var run = false
     private var th: Thread? = null
@@ -46,6 +47,7 @@ class VoskWake(
                 recog = Recognizer(m, rate.toFloat())
                 val buf = ShortArray(2048)
                 var lastBeatAt = 0L
+                var lastPartial = ""
                 while (run) {
                     val n = r.read(buf, 0, buf.size)
                     if (n < 0) break
@@ -54,10 +56,15 @@ class VoskWake(
                     if (now - lastBeatAt > 1000) { lastBeatAt = now; onBeat() }
                     if (recog.acceptWaveForm(buf, n)) {
                         val t = JSONObject(recog.result).optString("text", "")
+                        lastPartial = ""
                         if (t.isNotBlank() && run) onText(t)
+                    } else {
+                        val pt = JSONObject(recog.partialResult).optString("partial", "")
+                        if (pt.isNotBlank() && pt != lastPartial && run) { lastPartial = pt; onPartial(pt) }
                     }
                 }
             } catch (e: Throwable) {
+                status = "dinleme HATA: " + e.javaClass.simpleName + " " + (e.message ?: "").take(150)
             } finally {
                 run = false
                 try { r.stop() } catch (e: Exception) {}
@@ -77,6 +84,7 @@ class VoskWake(
         @Volatile var model: Model? = null
         @Volatile private var loading = false
         val ready: Boolean get() = model != null
+        @Volatile var status = "yukleniyor"
 
         fun prepare(ctx: Context) {
             if (model != null || loading) return
@@ -90,8 +98,11 @@ class VoskWake(
                         copyAssets(ctx.assets, "vosk-model", dir)
                         flag.writeText("1")
                     }
+                    status = "model yukleniyor"
                     model = Model(dir.absolutePath)
+                    status = "hazir"
                 } catch (e: Throwable) {
+                    status = "HATA: " + e.javaClass.simpleName + " " + (e.message ?: "").take(150)
                 } finally { loading = false }
             }.apply { isDaemon = true; start() }
         }

@@ -385,19 +385,58 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private var vosk: VoskWake? = null
 
     private fun startVosk(): Boolean {
-        if (!VoskWake.ready) return false
+        if (!VoskWake.ready) {
+            val now = System.currentTimeMillis()
+            if (now - lastVoskNote > 10000) { lastVoskNote = now; push("Vosk: " + VoskWake.status) }
+            return false
+        }
         if (vosk?.alive == true) return true
         try { recognizer?.cancel() } catch (e: Exception) {}
-        val v = VoskWake(this, { lastBeat = System.currentTimeMillis() }) { text -> main.post { onVoskText(text) } }
+        val v = VoskWake(this, { lastBeat = System.currentTimeMillis() }, { text -> main.post { onVoskText(text) } }, { text -> main.post { onVoskPartial(text) } })
         vosk = v
-        return v.start()
+        val ok = v.start()
+        val now = System.currentTimeMillis()
+        if (ok) push("Vosk dinliyor") else if (now - lastVoskNote > 10000) { lastVoskNote = now; push("Vosk mikrofon acilamadi: " + VoskWake.status) }
+        return ok
     }
 
     private fun stopVosk() { vosk?.stop(); vosk = null }
 
+    private var lastVoskNote = 0L
+    private var pwFirst = 0L
+    private var pwText = ""
+    private val pwRun = Runnable { firePartialWake() }
+
+    private fun fuzzyJarvis(w: String): Boolean {
+        if (w.length < 4 || w.length > 8) return false
+        return w.contains("arvi") || lev(w, "jarvis") <= 1 || lev(w, "carvis") <= 1
+    }
+
+    private fun onVoskPartial(text: String) {
+        if (!running || state != "wake") return
+        sendBroadcast(Intent(ACTION_STATE).setPackage(packageName).putExtra("heard", text))
+        if (parseWake(text) == null) return
+        val now = System.currentTimeMillis()
+        if (pwFirst == 0L) pwFirst = now
+        pwText = text
+        main.removeCallbacks(pwRun)
+        main.postDelayed(pwRun, minOf(700L, maxOf(0L, 2000L - (now - pwFirst))))
+    }
+
+    private fun firePartialWake() {
+        if (!running || state != "wake") { pwFirst = 0L; return }
+        val capped = System.currentTimeMillis() - pwFirst >= 1900L
+        val t = pwText
+        pwFirst = 0L
+        val words = (parseWake(t) ?: "").split(Regex("\\s+")).count { it.isNotEmpty() }
+        push("Duydum (anlik): $t")
+        handleWake(t, !capped && words <= 8)
+    }
+
     private fun onVoskText(text: String) {
         if (!running || state != "wake") return
         push("Duydum: $text")
+        if (parseWake(text) == null) { main.removeCallbacks(pwRun); pwFirst = 0L }
         if (parseWake(text) != null) handleWake(text, true)
     }
 
@@ -421,7 +460,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun isWake(w: String): Boolean {
-        if (w in wakeWords || w in voskAlias) return true
+        if (w in wakeWords || w in voskAlias || fuzzyJarvis(w)) return true
         return w.length >= 5 && wakeWords.any { it.length >= 5 && lev(w, it) <= 1 }
     }
 
@@ -441,6 +480,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         state = "speak"
         try { recognizer?.cancel() } catch (e: Exception) {}
         stopVosk()
+        main.removeCallbacks(pwRun); pwFirst = 0L
         val rest = if (allowRest) (parseWake(t) ?: "") else ""
         if (rest.length >= 4) process(rest)
         else speak("Buyrun efendim") { cmdTries = 0; state = "command"; push(); relisten(350) }
